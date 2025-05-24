@@ -1,4 +1,4 @@
-module mygameengine.com/engine
+module github.com/toxichemicals/GO
 
 go 1.19
 
