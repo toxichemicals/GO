@@ -8,10 +8,14 @@ import (
 	"time"
 	"unsafe" // For gl.PtrOffset
 
-	"github.com/go-gl/gl/v4.1-core/gl" // Direct import from go-gl/gl
-	"github.com/go-gl/glfw/v3.3/glfw" // Direct import from go-gl/glfw
-	"github.com/go-gl/mathgl/mgl32"   // Direct import from go-gl/mathgl
+	// *** CHANGE THIS LINE ***
+	// Old: "github.com/go-gl/gl/v4.1-core/gl"
+	// New:
+	"github.com/go-gl/gl" // Import the root module for go-gl/gl
+	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/go-gl/mathgl/mgl32"
 )
+
 
 // Core struct encapsulates the low-level graphics and windowing components.
 // This struct will be instantiated and managed by main.go directly.
