@@ -8,12 +8,13 @@ import (
 	"time"
 	"unsafe" // For gl.PtrOffset
 
-	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/go-gl/glfw/v3.3/glfw"
-	"github.com/go-gl/mathgl/mgl32"
+	"github.com/go-gl/gl/v4.1-core/gl" // Direct import from go-gl/gl
+	"github.com/go-gl/glfw/v3.3/glfw" // Direct import from go-gl/glfw
+	"github.com/go-gl/mathgl/mgl32"   // Direct import from go-gl/mathgl
 )
 
 // Core struct encapsulates the low-level graphics and windowing components.
+// This struct will be instantiated and managed by main.go directly.
 type Core struct {
 	window *glfw.Window
 
@@ -46,7 +47,7 @@ func NewCore(width, height int, title string) *Core {
 		title:  title,
 	}
 
-	// Define cube data (moved here from previous engine.go)
+	// Define cube data (moved here as it's part of the core's rendering capability)
 	c.vertices = []float32{
 		// Front face (Red)
 		-0.5, -0.5,  0.5,  1.0, 0.0, 0.0,
