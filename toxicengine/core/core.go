@@ -3,33 +3,28 @@ package core
 import (
 	"fmt"
 	"log"
-	"runtime"
+	"runtime" // Still useful for runtime.LockOSThread in some scenarios, but SDL manages its own thread
 	"strings"
-	"time"
 	"unsafe" // For gl.PtrOffset
 
-	// *** CHANGE THIS LINE ***
-	// Old: "github.com/go-gl/gl/v4.1-core/gl"
-	// New:
-	"github.com/go-gl/gl" // Import the root module for go-gl/gl
-	"github.com/go-gl/glfw/v3.3/glfw"
-	"github.com/go-gl/mathgl/mgl32"
+	"github.com/go-gl/gl"            // Still used for raw OpenGL commands
+	"github.com/go-gl/mathgl/mgl32" // Still used for matrix math
+	"github.com/veandco/go-sdl2/sdl" // New: SDL2 for windowing and events
 )
 
-
 // Core struct encapsulates the low-level graphics and windowing components.
-// This struct will be instantiated and managed by main.go directly.
 type Core struct {
-	window *glfw.Window
+	window *sdl.Window
+	glContext sdl.GLContext // Store the OpenGL context created by SDL
 
-	// OpenGL program and buffers for the cube (for now, will generalize later)
+	// OpenGL program and buffers for the cube
 	program        uint32
 	vao            uint32
 	vbo            uint32
 	ebo            uint32
 	indicesCount   int32
 
-	// Uniform locations (managed by Core)
+	// Uniform locations
 	modelUniform      int32
 	viewUniform       int32
 	projectionUniform int32
@@ -38,7 +33,10 @@ type Core struct {
 	width, height int
 	title         string
 
-	// Cube data (for now, eventually this would be managed by a scene graph or asset manager)
+	// Internal state for main loop
+	running bool
+
+	// Cube data (for now)
 	vertices []float32
 	indices  []uint32
 }
@@ -46,48 +44,48 @@ type Core struct {
 // NewCore creates and initializes a new Core graphics instance.
 func NewCore(width, height int, title string) *Core {
 	c := &Core{
-		width:  width,
-		height: height,
-		title:  title,
+		width:   width,
+		height:  height,
+		title:   title,
+		running: true, // Start as running
 	}
 
-	// Define cube data (moved here as it's part of the core's rendering capability)
 	c.vertices = []float32{
 		// Front face (Red)
-		-0.5, -0.5,  0.5,  1.0, 0.0, 0.0,
-		 0.5, -0.5,  0.5,  1.0, 0.0, 0.0,
-		 0.5,  0.5,  0.5,  1.0, 0.0, 0.0,
-		-0.5,  0.5,  0.5,  1.0, 0.0, 0.0,
+		-0.5, -0.5, 0.5, 1.0, 0.0, 0.0,
+		0.5, -0.5, 0.5, 1.0, 0.0, 0.0,
+		0.5, 0.5, 0.5, 1.0, 0.0, 0.0,
+		-0.5, 0.5, 0.5, 1.0, 0.0, 0.0,
 
 		// Back face (Green)
-		-0.5, -0.5, -0.5,  0.0, 1.0, 0.0,
-		 0.5, -0.5, -0.5,  0.0, 1.0, 0.0,
-		 0.5,  0.5, -0.5,  0.0, 1.0, 0.0,
-		-0.5,  0.5, -0.5,  0.0, 1.0, 0.0,
+		-0.5, -0.5, -0.5, 0.0, 1.0, 0.0,
+		0.5, -0.5, -0.5, 0.0, 1.0, 0.0,
+		0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
+		-0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
 
 		// Right face (Blue)
-		 0.5, -0.5,  0.5,  0.0, 0.0, 1.0,
-		 0.5, -0.5, -0.5,  0.0, 0.0, 1.0,
-		 0.5,  0.5, -0.5,  0.0, 0.0, 1.0,
-		 0.5,  0.5,  0.5,  0.0, 0.0, 1.0,
+		0.5, -0.5, 0.5, 0.0, 0.0, 1.0,
+		0.5, -0.5, -0.5, 0.0, 0.0, 1.0,
+		0.5, 0.5, -0.5, 0.0, 0.0, 1.0,
+		0.5, 0.5, 0.5, 0.0, 0.0, 1.0,
 
 		// Left face (Yellow)
-		-0.5, -0.5,  0.5,  1.0, 1.0, 0.0,
-		-0.5, -0.5, -0.5,  1.0, 1.0, 0.0,
-		-0.5,  0.5, -0.5,  1.0, 1.0, 0.0,
-		-0.5,  0.5,  0.5,  1.0, 1.0, 0.0,
+		-0.5, -0.5, 0.5, 1.0, 1.0, 0.0,
+		-0.5, -0.5, -0.5, 1.0, 1.0, 0.0,
+		-0.5, 0.5, -0.5, 1.0, 1.0, 0.0,
+		-0.5, 0.5, 0.5, 1.0, 1.0, 0.0,
 
 		// Top face (Cyan)
-		-0.5,  0.5,  0.5,  0.0, 1.0, 1.0,
-		 0.5,  0.5,  0.5,  0.0, 1.0, 1.0,
-		 0.5,  0.5, -0.5,  0.0, 1.0, 1.0,
-		-0.5,  0.5, -0.5,  0.0, 1.0, 1.0,
+		-0.5, 0.5, 0.5, 0.0, 1.0, 1.0,
+		0.5, 0.5, 0.5, 0.0, 1.0, 1.0,
+		0.5, 0.5, -0.5, 0.0, 1.0, 1.0,
+		-0.5, 0.5, -0.5, 0.0, 1.0, 1.0,
 
 		// Bottom face (Magenta)
-		-0.5, -0.5,  0.5,  1.0, 0.0, 1.0,
-		 0.5, -0.5,  0.5,  1.0, 0.0, 1.0,
-		 0.5, -0.5, -0.5,  1.0, 0.0, 1.0,
-		-0.5, -0.5, -0.5,  1.0, 0.0, 1.0,
+		-0.5, -0.5, 0.5, 1.0, 0.0, 1.0,
+		0.5, -0.5, 0.5, 1.0, 0.0, 1.0,
+		0.5, -0.5, -0.5, 1.0, 0.0, 1.0,
+		-0.5, -0.5, -0.5, 1.0, 0.0, 1.0,
 	}
 	c.indices = []uint32{
 		// Front
@@ -119,39 +117,49 @@ func NewCore(width, height int, title string) *Core {
 	return c
 }
 
-// Init initializes GLFW, OpenGL context, and prepares the core rendering data.
+// Init initializes SDL, OpenGL context, and prepares the core rendering data.
 func (c *Core) Init() error {
-	runtime.LockOSThread() // Crucial for GLFW
-	// No defer UnlockOSThread here, as it needs to stay locked for the entire Run loop.
-	// Unlock will happen in the Shutdown method.
+	// SDL doesn't usually require runtime.LockOSThread() as GLFW does
+	// for its main loop.
+	// runtime.LockOSThread()
 
-	if err := glfw.Init(); err != nil {
-		return fmt.Errorf("failed to initialize GLFW: %w", err)
+	if err := sdl.Init(sdl.INIT_EVERYTHING); err != nil {
+		return fmt.Errorf("failed to initialize SDL: %w", err)
 	}
 
-	glfw.WindowHint(glfw.ContextVersionMajor, 4)
-	glfw.WindowHint(glfw.ContextVersionMinor, 1)
-	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
-	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
+	// Set OpenGL attributes for context creation
+	sdl.GLSetAttribute(sdl.GL_CONTEXT_MAJOR_VERSION, 4)
+	sdl.GLSetAttribute(sdl.GL_CONTEXT_MINOR_VERSION, 1)
+	sdl.GLSetAttribute(sdl.GL_CONTEXT_PROFILE_MASK, sdl.GL_CONTEXT_PROFILE_CORE)
+	sdl.GLSetAttribute(sdl.GL_DOUBLEBUFFER, 1) // Enable double buffering
 
-	window, err := glfw.CreateWindow(c.width, c.height, c.title, nil, nil)
+	window, err := sdl.CreateWindow(c.title, sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED,
+		int32(c.width), int32(c.height), sdl.WINDOW_OPENGL|sdl.WINDOW_RESIZABLE)
 	if err != nil {
-		glfw.Terminate()
-		return fmt.Errorf("failed to create GLFW window: %w", err)
+		sdl.Quit()
+		return fmt.Errorf("failed to create SDL window: %w", err)
 	}
 	c.window = window
-	c.window.MakeContextCurrent()
+
+	glContext, err := window.GLCreateContext()
+	if err != nil {
+		window.Destroy()
+		sdl.Quit()
+		return fmt.Errorf("failed to create OpenGL context: %w", err)
+	}
+	c.glContext = glContext
+	sdl.GLMakeCurrent(window, glContext) // Make the context current after creation
 
 	if err := gl.Init(); err != nil {
-		c.window.Destroy()
-		glfw.Terminate()
+		window.Destroy()
+		sdl.Quit()
 		return fmt.Errorf("failed to initialize OpenGL: %w", err)
 	}
 
 	gl.Enable(gl.DEPTH_TEST)
 	gl.Viewport(0, 0, int32(c.width), int32(c.height))
 
-	// --- Shader Program Setup ---
+	// --- Shader Program Setup (unchanged) ---
 	vertexShaderSource := `
 		#version 410 core
 		layout (location = 0) in vec3 aPos;
@@ -182,7 +190,7 @@ func (c *Core) Init() error {
 	program, err := compileShader(vertexShaderSource, fragmentShaderSource)
 	if err != nil {
 		c.window.Destroy()
-		glfw.Terminate()
+		sdl.Quit()
 		return fmt.Errorf("failed to compile shaders: %w", err)
 	}
 	gl.UseProgram(program)
@@ -193,7 +201,7 @@ func (c *Core) Init() error {
 	c.viewUniform = gl.GetUniformLocation(c.program, gl.Str("view\x00"))
 	c.projectionUniform = gl.GetUniformLocation(c.program, gl.Str("projection\x00"))
 
-	// --- VBO, VAO, EBO Setup for the cube ---
+	// --- VBO, VAO, EBO Setup for the cube (unchanged) ---
 	gl.GenVertexArrays(1, &c.vao)
 	gl.BindVertexArray(c.vao)
 
@@ -215,28 +223,52 @@ func (c *Core) Init() error {
 
 	gl.BindVertexArray(0) // Unbind VAO
 
-	// --- Camera (View Matrix) Setup ---
+	// --- Camera (View Matrix) Setup (unchanged) ---
 	cameraPos := mgl32.Vec3{0, 0, 3}
 	cameraFront := mgl32.Vec3{0, 0, -1}
 	cameraUp := mgl32.Vec3{0, 1, 0}
 	view := mgl32.LookAtV(cameraPos, cameraPos.Add(cameraFront), cameraUp)
 	gl.UniformMatrix4fv(c.viewUniform, 1, false, &view[0])
 
-	// --- Projection Matrix Setup (Perspective) ---
+	// --- Projection Matrix Setup (Perspective) (unchanged) ---
 	projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(c.width)/float32(c.height), 0.1, 100.0)
 	gl.UniformMatrix4fv(c.projectionUniform, 1, false, &projection[0])
 
 	return nil
 }
 
-// ShouldClose returns true if the window should close.
+// ShouldClose returns true if the window should close (based on internal running flag).
 func (c *Core) ShouldClose() bool {
-	return c.window.ShouldClose()
+	return !c.running
 }
 
 // PollEvents processes window events.
 func (c *Core) PollEvents() {
-	glfw.PollEvents()
+	for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
+		switch event := event.(type) {
+		case *sdl.QuitEvent:
+			c.running = false
+		case *sdl.KeyboardEvent:
+			if event.Type == sdl.KEYDOWN {
+				switch event.Keysym.Sym {
+				case sdl.K_ESCAPE:
+					c.running = false
+				}
+			}
+		// Add other event handlers here as needed (mouse, resize, etc.)
+		case *sdl.WindowEvent:
+			if event.Event == sdl.WINDOWEVENT_RESIZED {
+				// Get current window size after resize
+				width, height := c.window.GetSize()
+				c.width = int(width)
+				c.height = int(height)
+				gl.Viewport(0, 0, int32(c.width), int32(c.height))
+				// Update projection matrix as aspect ratio might change
+				projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(c.width)/float32(c.height), 0.1, 100.0)
+				gl.UniformMatrix4fv(c.projectionUniform, 1, false, &projection[0])
+			}
+		}
+	}
 }
 
 // ClearFrame clears the color and depth buffers.
@@ -247,7 +279,7 @@ func (c *Core) ClearFrame() {
 
 // SwapBuffers swaps the front and back buffers to display the rendered frame.
 func (c *Core) SwapBuffers() {
-	c.window.SwapBuffers()
+	c.window.GLSwap() // SDL equivalent of glfw.SwapBuffers
 }
 
 // DrawCube draws the predefined cube with the given model matrix.
@@ -255,24 +287,29 @@ func (c *Core) DrawCube(modelMatrix mgl32.Mat4) {
 	gl.UniformMatrix4fv(c.modelUniform, 1, false, &modelMatrix[0])
 
 	gl.BindVertexArray(c.vao)
-	gl.DrawElements(gl.TRIANGLES, c.indicesCount, gl.UNSIGNED_INT, unsafe.Pointer(uintptr(0))) // Using unsafe.Pointer for offset 0
+	gl.DrawElements(gl.TRIANGLES, c.indicesCount, gl.UNSIGNED_INT, unsafe.Pointer(uintptr(0)))
 	gl.BindVertexArray(0)
 }
 
-// Shutdown cleans up core OpenGL and GLFW resources.
+// Shutdown cleans up core OpenGL and SDL resources.
 func (c *Core) Shutdown() {
 	gl.DeleteVertexArrays(1, &c.vao)
 	gl.DeleteBuffers(1, &c.vbo)
 	gl.DeleteBuffers(1, &c.ebo)
 	gl.DeleteProgram(c.program)
 
-	c.window.Destroy()
-	glfw.Terminate()
+	if c.glContext != nil {
+		sdl.GLDeleteContext(c.glContext)
+	}
+	if c.window != nil {
+		c.window.Destroy()
+	}
+	sdl.Quit() // Quit SDL subsystems
 
-	runtime.UnlockOSThread() // Unlock the OS thread
+	// runtime.UnlockOSThread() // No longer needed as we removed runtime.LockOSThread()
 }
 
-// --- Helper functions for shader compilation (remain in core.go) ---
+// --- Helper functions for shader compilation (unchanged, stay in core.go) ---
 
 // compileShader compiles vertex and fragment shaders into an OpenGL program.
 func compileShader(vertexShaderSource, fragmentShaderSource string) (uint32, error) {
