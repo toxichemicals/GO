@@ -8,8 +8,8 @@ import (
 	"time"
 	"unsafe" // For gl.PtrOffset
 
-	"github.com/go-gl/gl/v4.6-core/gl" // Still using this for OpenGL functions
-	"github.com/go-gl/glfw/v3.3/glfw" // NEW: GLFW for windowing
+	"github.com/go-gl/gl/v4.6-core/gl"
+	"github.com/go-gl/glfw/v3.3/glfw"
 	"github.com/go-gl/mathgl/mgl32"
 )
 
@@ -22,7 +22,7 @@ const (
 
 // AppCore struct encapsulates the low-level graphics and windowing components.
 type AppCore struct {
-	window *glfw.Window // Changed from *sdl.Window to *glfw.Window
+	window *glfw.Window
 
 	// OpenGL program and buffers for the cube
 	program      uint32
@@ -38,7 +38,7 @@ type AppCore struct {
 
 	// Window dimensions
 	width, height int
-	title         string
+	title         string // Original window title
 
 	// Internal state for main loop
 	running bool
@@ -46,126 +46,174 @@ type AppCore struct {
 	// Cube data
 	vertices []float32
 	indices  []uint32
+
+	// Game state for animation
+	totalRotationX float32
+	totalRotationY float32
+	lastFrameTime  time.Time
+
+	// FPS Counter state
+	fpsFrames      int       // Number of frames rendered in the current second
+	fpsLastUpdateTime time.Time // Last time the FPS was updated/displayed
+
+	// VSync Control state
+	vsyncEnabled    bool // Current VSync state (true = on, false = off)
+	vKeyWasPressed bool // Debounce flag for 'V' key
 }
 
 // Global instance of AppCore
 var app *AppCore
 
 // initApp initializes GLFW, OpenGL context, and prepares the core rendering data.
+// This function will now orchestrate calls to more granular initialization steps.
 func initApp() error {
 	runtime.LockOSThread() // GLFW requires this
-	// defer runtime.UnlockOSThread() // This will be handled by the main defer
 
 	app = &AppCore{
 		width:   screenWidth,
 		height:  screenHeight,
-		title:   windowTitle,
-		running: true, // Start as running
+		title:   windowTitle, // Store the base title
+		running: true,        // Start as running
+		vertices: []float32{
+			// Front face (Red)
+			-0.5, -0.5, 0.5, 1.0, 0.0, 0.0,
+			0.5, -0.5, 0.5, 1.0, 0.0, 0.0,
+			0.5, 0.5, 0.5, 1.0, 0.0, 0.0,
+			-0.5, 0.5, 0.5, 1.0, 0.0, 0.0,
+
+			// Back face (Green)
+			-0.5, -0.5, -0.5, 0.0, 1.0, 0.0,
+			0.5, -0.5, -0.5, 0.0, 1.0, 0.0,
+			0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
+			-0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
+
+			// Right face (Blue)
+			0.5, -0.5, 0.5, 0.0, 0.0, 1.0,
+			0.5, -0.5, -0.5, 0.0, 0.0, 1.0,
+			0.5, 0.5, -0.5, 0.0, 0.0, 1.0,
+			0.5, 0.5, 0.5, 0.0, 0.0, 1.0,
+
+			// Left face (Yellow)
+			-0.5, -0.5, 0.5, 1.0, 1.0, 0.0,
+			-0.5, -0.5, -0.5, 1.0, 1.0, 0.0,
+			-0.5, 0.5, -0.5, 1.0, 1.0, 0.0,
+			-0.5, 0.5, 0.5, 1.0, 1.0, 0.0,
+
+			// Top face (Cyan)
+			-0.5, 0.5, 0.5, 0.0, 1.0, 1.0,
+			0.5, 0.5, 0.5, 0.0, 1.0, 1.0,
+			0.5, 0.5, -0.5, 0.0, 1.0, 1.0,
+			-0.5, 0.5, -0.5, 0.0, 1.0, 1.0,
+
+			// Bottom face (Magenta)
+			-0.5, -0.5, 0.5, 1.0, 0.0, 1.0,
+			0.5, -0.5, 0.5, 1.0, 0.0, 1.0,
+			0.5, -0.5, -0.5, 1.0, 0.0, 1.0,
+			-0.5, -0.5, -0.5, 1.0, 0.0, 1.0,
+		},
+		indices: []uint32{
+			// Front
+			0, 1, 2,
+			2, 3, 0,
+
+			// Back
+			4, 5, 6,
+			6, 7, 4,
+
+			// Right
+			8, 9, 10,
+			10, 11, 8,
+
+			// Left
+			12, 13, 14,
+			14, 15, 12,
+
+			// Top
+			16, 17, 18,
+			18, 19, 16,
+
+			// Bottom
+			20, 21, 22,
+			22, 23, 20,
+		},
+	}
+	app.indicesCount = int32(len(app.indices))
+
+	if err := app.initializeWindow(); err != nil {
+		return fmt.Errorf("window initialization failed: %w", err)
 	}
 
-	// Initialize GLFW
+	if err := app.initializeOpenGL(); err != nil {
+		return fmt.Errorf("OpenGL initialization failed: %w", err)
+	}
+
+	if err := app.setupShadersAndUniforms(); err != nil {
+		return fmt.Errorf("shader setup failed: %w", err)
+	}
+
+	if err := app.setupCubeBuffers(); err != nil {
+		return fmt.Errorf("cube buffer setup failed: %w", err)
+	}
+
+	app.setupCameraAndProjection()
+
+	app.lastFrameTime = time.Now()      // Initialize lastFrameTime for delta time calculation
+	app.fpsLastUpdateTime = time.Now() // Initialize for FPS counter
+	app.fpsFrames = 0                   // Initialize frame counter
+
+	return nil
+}
+
+// initializeWindow handles GLFW initialization and window creation.
+func (a *AppCore) initializeWindow() error {
 	if err := glfw.Init(); err != nil {
 		return fmt.Errorf("failed to initialize GLFW: %w", err)
 	}
 
-	// Set GLFW window hints for OpenGL context
 	glfw.WindowHint(glfw.ContextVersionMajor, 4)
-	glfw.WindowHint(glfw.ContextVersionMinor, 6) // Matching v4.6-core/gl
+	glfw.WindowHint(glfw.ContextVersionMinor, 6)
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
-	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True) // Required for macOS
+	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
 
-	window, err := glfw.CreateWindow(app.width, app.height, app.title, nil, nil)
+	window, err := glfw.CreateWindow(a.width, a.height, a.title, nil, nil)
 	if err != nil {
 		glfw.Terminate()
 		return fmt.Errorf("failed to create GLFW window: %w", err)
 	}
-	app.window = window
-	app.window.MakeContextCurrent() // Make the OpenGL context current
+	a.window = window
+	a.window.MakeContextCurrent()
 
-	// Set a callback for window resizing
-	app.window.SetFramebufferSizeCallback(func(_ *glfw.Window, width, height int) {
-		app.width = width
-		app.height = height
+	// Initialize VSync state to ON (capped)
+	a.vsyncEnabled = true
+	glfw.SwapInterval(1) // 1 for VSync ON, 0 for VSync OFF
+	log.Println("VSync ON (default)")
+
+	a.window.SetFramebufferSizeCallback(func(_ *glfw.Window, width, height int) {
+		a.width = width
+		a.height = height
 		gl.Viewport(0, 0, int32(width), int32(height))
-		projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(app.width)/float32(app.height), 0.1, 100.0)
-		gl.UniformMatrix4fv(app.projectionUniform, 1, false, &projection[0])
+		// Re-calculate projection matrix on resize
+		projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(a.width)/float32(a.height), 0.1, 100.0)
+		gl.UniformMatrix4fv(a.projectionUniform, 1, false, &projection[0])
 	})
 
-	// Initialize GL
+	return nil
+}
+
+// initializeOpenGL initializes GL and sets global OpenGL states.
+func (a *AppCore) initializeOpenGL() error {
 	if err := gl.Init(); err != nil {
 		glfw.Terminate()
 		return fmt.Errorf("failed to initialize OpenGL: %w", err)
 	}
 
 	gl.Enable(gl.DEPTH_TEST)
-	gl.Viewport(0, 0, int32(app.width), int32(app.height))
+	gl.Viewport(0, 0, int32(a.width), int32(a.height))
+	return nil
+}
 
-	// --- Cube Data (unchanged) ---
-	app.vertices = []float32{
-		// Front face (Red)
-		-0.5, -0.5, 0.5, 1.0, 0.0, 0.0,
-		0.5, -0.5, 0.5, 1.0, 0.0, 0.0,
-		0.5, 0.5, 0.5, 1.0, 0.0, 0.0,
-		-0.5, 0.5, 0.5, 1.0, 0.0, 0.0,
-
-		// Back face (Green)
-		-0.5, -0.5, -0.5, 0.0, 1.0, 0.0,
-		0.5, -0.5, -0.5, 0.0, 1.0, 0.0,
-		0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
-		-0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
-
-		// Right face (Blue)
-		0.5, -0.5, 0.5, 0.0, 0.0, 1.0,
-		0.5, -0.5, -0.5, 0.0, 0.0, 1.0,
-		0.5, 0.5, -0.5, 0.0, 0.0, 1.0,
-		0.5, 0.5, 0.5, 0.0, 0.0, 1.0,
-
-		// Left face (Yellow)
-		-0.5, -0.5, 0.5, 1.0, 1.0, 0.0,
-		-0.5, -0.5, -0.5, 1.0, 1.0, 0.0,
-		-0.5, 0.5, -0.5, 1.0, 1.0, 0.0,
-		-0.5, 0.5, 0.5, 1.0, 1.0, 0.0,
-
-		// Top face (Cyan)
-		-0.5, 0.5, 0.5, 0.0, 1.0, 1.0,
-		0.5, 0.5, 0.5, 0.0, 1.0, 1.0,
-		0.5, 0.5, -0.5, 0.0, 1.0, 1.0,
-		-0.5, 0.5, -0.5, 0.0, 1.0, 1.0,
-
-		// Bottom face (Magenta)
-		-0.5, -0.5, 0.5, 1.0, 0.0, 1.0,
-		0.5, -0.5, 0.5, 1.0, 0.0, 1.0,
-		0.5, -0.5, -0.5, 1.0, 0.0, 1.0,
-		-0.5, -0.5, -0.5, 1.0, 0.0, 1.0,
-	}
-	app.indices = []uint32{
-		// Front
-		0, 1, 2,
-		2, 3, 0,
-
-		// Back
-		4, 5, 6,
-		6, 7, 4,
-
-		// Right
-		8, 9, 10,
-		10, 11, 8,
-
-		// Left
-		12, 13, 14,
-		14, 15, 12,
-
-		// Top
-		16, 17, 18,
-		18, 19, 16,
-
-		// Bottom
-		20, 21, 22,
-		22, 23, 20,
-	}
-	app.indicesCount = int32(len(app.indices))
-
-	// --- Shader Program Setup (unchanged) ---
+// setupShadersAndUniforms compiles shaders, links the program, and gets uniform locations.
+func (a *AppCore) setupShadersAndUniforms() error {
 	vertexShaderSource := `
 		#version 410 core
 		layout (location = 0) in vec3 aPos;
@@ -195,29 +243,30 @@ func initApp() error {
 
 	program, err := compileShader(vertexShaderSource, fragmentShaderSource)
 	if err != nil {
-		app.window.Destroy()
-		glfw.Terminate()
 		return fmt.Errorf("failed to compile shaders: %w", err)
 	}
 	gl.UseProgram(program)
-	app.program = program
+	a.program = program
 
-	// Get uniform locations
-	app.modelUniform = gl.GetUniformLocation(app.program, gl.Str("model\x00"))
-	app.viewUniform = gl.GetUniformLocation(app.program, gl.Str("view\x00"))
-	app.projectionUniform = gl.GetUniformLocation(app.program, gl.Str("projection\x00"))
+	a.modelUniform = gl.GetUniformLocation(a.program, gl.Str("model\x00"))
+	a.viewUniform = gl.GetUniformLocation(a.program, gl.Str("view\x00"))
+	a.projectionUniform = gl.GetUniformLocation(a.program, gl.Str("projection\x00"))
 
-	// --- VBO, VAO, EBO Setup for the cube (unchanged) ---
-	gl.GenVertexArrays(1, &app.vao)
-	gl.BindVertexArray(app.vao)
+	return nil
+}
 
-	gl.GenBuffers(1, &app.vbo)
-	gl.BindBuffer(gl.ARRAY_BUFFER, app.vbo)
-	gl.BufferData(gl.ARRAY_BUFFER, len(app.vertices)*4, gl.Ptr(app.vertices), gl.STATIC_DRAW)
+// setupCubeBuffers configures VAO, VBO, and EBO for the cube data.
+func (a *AppCore) setupCubeBuffers() error {
+	gl.GenVertexArrays(1, &a.vao)
+	gl.BindVertexArray(a.vao)
 
-	gl.GenBuffers(1, &app.ebo)
-	gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, app.ebo)
-	gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(app.indices)*4, gl.Ptr(app.indices), gl.STATIC_DRAW)
+	gl.GenBuffers(1, &a.vbo)
+	gl.BindBuffer(gl.ARRAY_BUFFER, a.vbo)
+	gl.BufferData(gl.ARRAY_BUFFER, len(a.vertices)*4, gl.Ptr(a.vertices), gl.STATIC_DRAW)
+
+	gl.GenBuffers(1, &a.ebo)
+	gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, a.ebo)
+	gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(a.indices)*4, gl.Ptr(a.indices), gl.STATIC_DRAW)
 
 	// Position attribute (layout location 0)
 	gl.VertexAttribPointer(0, 3, gl.FLOAT, false, 6*4, gl.Ptr(nil))
@@ -229,56 +278,89 @@ func initApp() error {
 
 	gl.BindVertexArray(0) // Unbind VAO
 
-	// --- Camera (View Matrix) Setup (unchanged) ---
+	return nil
+}
+
+// setupCameraAndProjection sets up initial view and projection matrices.
+func (a *AppCore) setupCameraAndProjection() {
 	cameraPos := mgl32.Vec3{0, 0, 3}
 	cameraFront := mgl32.Vec3{0, 0, -1}
 	cameraUp := mgl32.Vec3{0, 1, 0}
 	view := mgl32.LookAtV(cameraPos, cameraPos.Add(cameraFront), cameraUp)
-	gl.UniformMatrix4fv(app.viewUniform, 1, false, &view[0])
+	gl.UniformMatrix4fv(a.viewUniform, 1, false, &view[0])
 
-	// --- Projection Matrix Setup (Perspective) (unchanged) ---
-	projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(app.width)/float32(app.height), 0.1, 100.0)
-	gl.UniformMatrix4fv(app.projectionUniform, 1, false, &projection[0])
-
-	return nil
+	projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(a.width)/float32(a.height), 0.1, 100.0)
+	gl.UniformMatrix4fv(a.projectionUniform, 1, false, &projection[0])
 }
 
-// shouldClose returns true if the window should close.
-func shouldClose() bool {
-	return app.window.ShouldClose() || !app.running
-}
+// processInput handles keyboard/mouse input.
+func (a *AppCore) processInput() {
+	glfw.PollEvents()
 
-// pollEvents processes window events (GLFW)
-func pollEvents() {
-	glfw.PollEvents() // GLFW's way of processing events
-	// You can set key/mouse callbacks here if needed, for simplicity we rely on ShouldClose
-	if app.window.GetKey(glfw.KeyEscape) == glfw.Press {
-		app.running = false // Set running to false if escape is pressed
+	if a.window.GetKey(glfw.KeyEscape) == glfw.Press {
+		a.running = false
 	}
+
+	// VSync toggle logic
+	currentVState := a.window.GetKey(glfw.KeyV)
+	if currentVState == glfw.Press && !a.vKeyWasPressed {
+		a.vsyncEnabled = !a.vsyncEnabled
+		if a.vsyncEnabled {
+			glfw.SwapInterval(1) // Enable VSync
+			log.Println("VSync: ON (FPS capped)")
+		} else {
+			glfw.SwapInterval(0) // Disable VSync
+			log.Println("VSync: OFF (FPS uncapped)")
+		}
+	}
+	a.vKeyWasPressed = (currentVState == glfw.Press)
 }
 
-// clearFrame clears the color and depth buffers.
-func clearFrame() {
-	gl.ClearColor(0.2, 0.3, 0.3, 1.0) // Dark teal background
+// updateScene updates the game state (e.g., cube rotation).
+func (a *AppCore) updateScene(deltaTime float32) {
+	a.totalRotationY += deltaTime * mgl32.DegToRad(50.0)
+	a.totalRotationX += deltaTime * mgl32.DegToRad(25.0)
+}
+
+// renderScene clears buffers, draws the cube, and swaps buffers.
+func (a *AppCore) renderScene() {
+	gl.ClearColor(0.2, 0.3, 0.3, 1.0)
 	gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-}
 
-// swapBuffers swaps the front and back buffers to display the rendered frame.
-func swapBuffers() {
-	app.window.SwapBuffers() // GLFW equivalent of glfw.SwapBuffers
+	// Calculate the model matrix for the cube's current rotation
+	model := mgl32.Ident4()
+	model = model.Mul4(mgl32.HomogRotate3DY(a.totalRotationY))
+	model = model.Mul4(mgl32.HomogRotate3DX(a.totalRotationX))
+
+	a.drawCube(model)
+	a.window.SwapBuffers()
 }
 
 // drawCube draws the predefined cube with the given model matrix.
-func drawCube(modelMatrix mgl32.Mat4) {
-	gl.UniformMatrix4fv(app.modelUniform, 1, false, &modelMatrix[0])
+func (a *AppCore) drawCube(modelMatrix mgl32.Mat4) {
+	gl.UniformMatrix4fv(a.modelUniform, 1, false, &modelMatrix[0])
 
-	gl.BindVertexArray(app.vao)
-	gl.DrawElements(gl.TRIANGLES, app.indicesCount, gl.UNSIGNED_INT, unsafe.Pointer(uintptr(0)))
+	gl.BindVertexArray(a.vao)
+	gl.DrawElements(gl.TRIANGLES, a.indicesCount, gl.UNSIGNED_INT, unsafe.Pointer(uintptr(0)))
 	gl.BindVertexArray(0)
+}
+
+// updateAndDisplayFPS calculates and displays FPS in the window title.
+func (a *AppCore) updateAndDisplayFPS() {
+	a.fpsFrames++
+	if time.Since(a.fpsLastUpdateTime) >= time.Second {
+		fps := float64(a.fpsFrames) / time.Since(a.fpsLastUpdateTime).Seconds()
+		a.window.SetTitle(fmt.Sprintf("%s | FPS: %.2f", a.title, fps)) // Use original title + FPS
+		a.fpsFrames = 0
+		a.fpsLastUpdateTime = time.Now()
+	}
 }
 
 // shutdownApp cleans up core OpenGL and GLFW resources.
 func shutdownApp() {
+	if app == nil { // Ensure app is initialized before attempting to clean up
+		return
+	}
 	gl.DeleteVertexArrays(1, &app.vao)
 	gl.DeleteBuffers(1, &app.vbo)
 	gl.DeleteBuffers(1, &app.ebo)
@@ -357,51 +439,42 @@ func checkProgramLinkStatus(program uint32) error {
 	return nil
 }
 
+// shouldClose returns true if the window should close.
+func (a *AppCore) shouldClose() bool {
+	return a.window.ShouldClose() || !a.running
+}
+
+// main orchestrates the application flow using high-level functions.
 func main() {
-	runtime.LockOSThread() // Required for GLFW
+	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	defer shutdownApp() // Ensure shutdown is called
+	defer shutdownApp()
 
 	if err := initApp(); err != nil {
 		log.Fatalf("Application initialization failed: %v", err)
 	}
 
-	log.Println("Engine (main.go) initialized. Starting main loop...")
+	log.Println("Engine initialized. Starting main loop...")
 
-	// --- Game State Variables (for the rotating cube) ---
-	var totalRotationX float32
-	var totalRotationY float32
-	lastFrameTime := time.Now() // To calculate deltaTime for smooth, frame-rate independent motion
+	// Main Game Loop
+	for !app.shouldClose() {
+		// 1. Event Processing (includes VSync toggle)
+		app.processInput()
 
-	// --- Main Game Loop ---
-	for !shouldClose() { // Loop as long as the window is not requested to close
 		// Calculate delta time
 		currentTime := time.Now()
-		deltaTime := float32(currentTime.Sub(lastFrameTime).Seconds())
-		lastFrameTime = currentTime
+		deltaTime := float32(currentTime.Sub(app.lastFrameTime).Seconds())
+		app.lastFrameTime = currentTime
 
-		// 1. Event Processing: Poll for and process window events (handled by GLFW)
-		pollEvents()
+		// 2. Update Game Logic
+		app.updateScene(deltaTime)
 
-		// 2. Clear Frame: Clear the screen's color and depth buffers
-		clearFrame()
+		// 3. Render Scene
+		app.renderScene()
 
-		// 3. Update Game Logic: Calculate new rotation values based on delta time
-		totalRotationY += deltaTime * mgl32.DegToRad(50.0) // Rotate around Y-axis at 50 degrees per second
-		totalRotationX += deltaTime * mgl32.DegToRad(25.0) // Rotate around X-axis at 25 degrees per second
-
-		// 4. Render (Draw Cube):
-		//    a. Calculate the model matrix for the cube's current rotation
-		model := mgl32.Ident4() // Start with an identity matrix
-		model = model.Mul4(mgl32.HomogRotate3DY(totalRotationY)) // Apply Y-axis rotation
-		model = model.Mul4(mgl32.HomogRotate3DX(totalRotationX)) // Apply X-axis rotation
-
-		//    b. Pass the calculated model matrix to the core library for drawing
-		drawCube(model)
-
-		// 5. Swap Buffers: Display the rendered frame on the screen
-		swapBuffers()
+		// 4. Update and Display FPS
+		app.updateAndDisplayFPS()
 	}
 
-	log.Println("Engine (main.go) shutting down.")
+	log.Println("Engine shutting down.")
 }
