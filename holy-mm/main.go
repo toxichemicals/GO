@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"image"
 	"image/draw"
@@ -9,7 +10,9 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe" // For gl.PtrOffset
@@ -23,31 +26,19 @@ import (
 const (
 	screenWidth      = 1280 // Increased width for UI
 	screenHeight     = 720  // Increased height for UI
-	windowTitle      = "Holy Engine Base" // Changed title
-	cameraSpeed      float32 = 5.0    // Units per second for camera movement (Explicitly float32)
+	windowTitle      = "Holy Model Maker (Editor - Custom GUI)"
+	cameraSpeed      = 5.0    // Units per second for camera movement
 	mouseSensitivity = 0.1    // Degrees per pixel for mouse look
 	farClippingPlane = 1000.0 // Increased for distant objects
-
-	// Physics constants
-	Gravity             = -9.81 // m/s^2, downward acceleration
-	PhysicsTimestep     = 1.0 / 60.0 // Fixed timestep for physics updates (60 Hz)
-	GroundPlaneY        = 0.0        // Y-coordinate of the ground
-	ThrowForceMagnitude = 10.0      // How strong a thrown object is pushed
-	PickupRange         = 10.0       // Max distance to pick up an object
-	InitialHoldDistance = 2.0        // Default distance to hold object
-	MinHoldDistance     = 1.0
-	MaxHoldDistance     = 5.0
-	ScrollSensitivity   = 0.1 // For adjusting hold distance
 )
 
 // UI Constants - Explicitly define as float32
 const (
-	uiPanelWidth     float32 = 250.0
-	uiPadding        float32 = 10.0
-	uiButtonHeight   float32 = 30.0
-	uiSliderHeight   float32 = 20.0
+	uiPanelWidth  float32 = 250.0
+	uiPadding     float32 = 10.0
+	uiButtonHeight float32 = 30.0
+	uiSliderHeight float32 = 20.0
 	uiElementSpacing float32 = 5.0
-	uiTextHeight     float32 = 16.0 // Approximate height for a line of text
 )
 
 // AppCore struct encapsulates the editor's state and rendering components.
@@ -76,7 +67,6 @@ type AppCore struct {
 	lastFrameTime     time.Time
 	fpsFrames         int
 	fpsLastUpdateTime time.Time
-	physicsAccumulator float32 // For fixed physics timestep
 
 	// Camera Control state
 	cameraPos   mgl32.Vec3
@@ -87,37 +77,19 @@ type AppCore struct {
 	firstMouse  bool
 	mouseLastX  float64
 	mouseLastY  float64
-	isMouseGrabbed bool // New: Track if mouse is grabbed
 	rightMouseButtonPressed bool // Track right mouse button state for camera look
 
-	// Engine state (now more like "engine" state)
+	// Editor state
 	objects []*GameObject       // All objects in the scene
 	selectedObject *GameObject // Currently selected object for properties panel
 	nextObjectID int            // For unique object IDs
 
-	// Hand tool state
-	heldObject *GameObject
-	holdDistance float32
-	isRotatingHeldObject bool // True if 'R' is held and rotating the object
-	lastMouseXForRotation float64
-	lastMouseYForRotation float64
-
 	// Custom UI State
-	mouseLeftPressed bool // Becomes true on press, false on release
-	mouseLeftReleased bool // Becomes true on release, false on next frame
+	mouseLeftPressed bool
+	mouseLeftReleased bool
 	mousePosX float32
 	mousePosY float32
 	activeUIElement string // Tracks which UI element is being interacted with (e.g., "slider_pos_x")
-
-	// E GUI state
-	isEGUIVisible bool // Controls visibility of the 'E' menu
-	eKeyWasPressed bool // Debounce for 'E' key
-}
-
-// BoundingBox defines an Axis-Aligned Bounding Box.
-type BoundingBox struct {
-	Min mgl32.Vec3
-	Max mgl32.Vec3
 }
 
 // GameObject represents a loaded or procedurally generated 3D model.
@@ -133,16 +105,8 @@ type GameObject struct {
 
 	// Transformation fields
 	Position mgl32.Vec3
-	Rotation mgl32.Vec3 // Euler angles (pitch, yaw, roll) for rendering
+	Rotation mgl32.Vec3 // Euler angles (pitch, yaw, roll) - still here but not directly manipulated by UI
 	Scale    mgl32.Vec3
-
-	// Physics fields
-	Velocity      mgl32.Vec3 // Linear velocity
-	AngularVelocity mgl32.Vec3 // Angular velocity (radians/second)
-	IsKinematic   bool       // If true, object is moved directly, not by physics
-	IsGrounded    bool       // True if object is touching the ground
-	BoundingBox   BoundingBox // Local-space bounding box
-	Mass          float32    // For physics calculations (e.g., momentum)
 }
 
 // Global instance of AppCore
@@ -167,23 +131,12 @@ func initApp() error {
 		yaw:         -90.0,                    // Yaw to look along negative Z initially
 		pitch:       0.0,                      // No pitch initially
 		firstMouse:  true,
-		isMouseGrabbed: true, // Start with mouse grabbed for immediate camera control
-		holdDistance: InitialHoldDistance, // Default hold distance
-		isEGUIVisible: false, // E GUI is hidden by default
 	}
 
 	// Initialize GLFW window
 	if err := app.initializeWindow(); err != nil {
 		return fmt.Errorf("window initialization failed: %w", err)
 	}
-
-	// Set initial mouse mode (grabbed)
-	if app.isMouseGrabbed {
-		app.window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
-	} else {
-		app.window.SetInputMode(glfw.CursorMode, glfw.CursorNormal)
-	}
-
 
 	// Initialize OpenGL
 	if err := app.initializeOpenGL(); err != nil {
@@ -207,9 +160,6 @@ func initApp() error {
 	app.lastFrameTime = time.Now()
 	app.fpsLastUpdateTime = time.Now()
 	app.fpsFrames = 0
-
-	// Create a ground plane (simple visual, not a full physics collider yet)
-	app.createGroundPlane()
 
 	return nil
 }
@@ -245,8 +195,8 @@ func (a *AppCore) initializeWindow() error {
 		a.mousePosX = float32(xpos)
 		a.mousePosY = float32(ypos)
 
-		// Only handle camera rotation if mouse is grabbed AND not rotating held object AND no UI element is active
-		if a.isMouseGrabbed && !a.isRotatingHeldObject && a.activeUIElement == "" {
+		// Only handle camera rotation if right mouse button is pressed AND no UI element is active
+		if a.window.GetMouseButton(glfw.MouseButtonRight) == glfw.Press && a.activeUIElement == "" {
 			if a.firstMouse {
 				a.mouseLastX = xpos
 				a.mouseLastY = ypos
@@ -272,20 +222,6 @@ func (a *AppCore) initializeWindow() error {
 				a.pitch = -89.0
 			}
 			a.updateCameraAndProjection()
-		} else if a.isRotatingHeldObject { // If rotating held object, prioritize that
-			if a.firstMouse { // This firstMouse is for the rotation of held object
-				a.lastMouseXForRotation, a.lastMouseYForRotation = a.window.GetCursorPos()
-			}
-			xoffset := float32(xpos - a.lastMouseXForRotation)
-			yoffset := float32(a.lastMouseYForRotation - ypos) // Reversed Y-coordinates
-			a.lastMouseXForRotation = xpos
-			a.lastMouseYForRotation = ypos
-
-			// Apply angular velocity to held object
-			if a.heldObject != nil {
-				// Crude rotation, needs more precise handling for real physics
-				a.heldObject.AngularVelocity = mgl32.Vec3{yoffset * 0.1, xoffset * 0.1, 0} // Example
-			}
 		} else {
 			a.firstMouse = true // Reset when mouse button is released or UI is active
 		}
@@ -296,21 +232,10 @@ func (a *AppCore) initializeWindow() error {
 			if action == glfw.Press {
 				a.mouseLeftPressed = true
 				a.mouseLeftReleased = false // Reset released state
-
-				// Only attempt to pick up object if mouse is grabbed AND not interacting with UI
-				if a.isMouseGrabbed && a.activeUIElement == "" {
-					a.tryPickObject()
-				}
-
 			} else if action == glfw.Release {
 				a.mouseLeftReleased = true
 				a.mouseLeftPressed = false // Reset pressed state
 				a.activeUIElement = "" // Release any active UI element
-
-				// Release held object if left click released and it was held
-				if a.heldObject != nil {
-					a.releaseHeldObject()
-				}
 			}
 		}
 		if button == glfw.MouseButtonRight {
@@ -319,12 +244,6 @@ func (a *AppCore) initializeWindow() error {
 			} else if action == glfw.Release {
 				a.rightMouseButtonPressed = false
 			}
-		}
-	})
-
-	a.window.SetScrollCallback(func(_ *glfw.Window, xoff, yoff float64) {
-		if a.heldObject != nil {
-			a.holdDistance = mgl32.Clamp(a.holdDistance-float32(yoff)*ScrollSensitivity, MinHoldDistance, MaxHoldDistance)
 		}
 	})
 
@@ -460,78 +379,14 @@ func (a *AppCore) updateCameraAndProjection() {
 func (a *AppCore) processInput(deltaTime float32) {
 	glfw.PollEvents() // Poll GLFW events first
 
-	// Toggle mouse grab with ESC
+	// Check for ESC key to quit
 	if a.window.GetKey(glfw.KeyEscape) == glfw.Press {
-		if a.isMouseGrabbed {
-			a.isMouseGrabbed = false
-			a.window.SetInputMode(glfw.CursorMode, glfw.CursorNormal)
-			a.firstMouse = true // Reset mouse state when ungrabbed
-			// Release held object if any
-			if a.heldObject != nil {
-				a.releaseHeldObject()
-			}
-		} else { // If not grabbed, re-grab on ESC (or click)
-			a.isMouseGrabbed = true
-			a.window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
-			a.firstMouse = true // Reset mouse state when grabbed
-		}
+		a.running = false
 	}
 
-	// Toggle E GUI with 'E' key
-	currentEState := a.window.GetKey(glfw.KeyE)
-	if currentEState == glfw.Press && !a.eKeyWasPressed {
-		a.isEGUIVisible = !a.isEGUIVisible
-		if a.isEGUIVisible {
-			a.isMouseGrabbed = false
-			a.window.SetInputMode(glfw.CursorMode, glfw.CursorNormal)
-			if a.heldObject != nil { // Release object if E GUI is opened while holding
-				a.releaseHeldObject()
-			}
-			log.Println("E GUI: Visible. Mouse released.")
-		} else {
-			a.isMouseGrabbed = true
-			a.window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
-			log.Println("E GUI: Hidden. Mouse grabbed.")
-		}
-		a.firstMouse = true // Reset mouse state when toggling E GUI
-	}
-	a.eKeyWasPressed = (currentEState == glfw.Press)
-
-
-	// Handle 'R' key for rotating held object
-	if a.heldObject != nil {
-		if a.window.GetKey(glfw.KeyR) == glfw.Press {
-			if !a.isRotatingHeldObject {
-				a.isRotatingHeldObject = true
-				// Capture current mouse position for relative rotation
-				a.lastMouseXForRotation, a.lastMouseYForRotation = a.window.GetCursorPos()
-			}
-		} else {
-			if a.isRotatingHeldObject {
-				a.isRotatingHeldObject = false
-				// When R is released, stop applying new angular velocity from mouse,
-				// but let existing angular velocity decay naturally (or stop immediately if desired).
-				// For now, we'll just stop applying new input.
-				// a.heldObject.AngularVelocity = mgl32.Vec3{0,0,0} // Uncomment to stop rotation immediately
-			}
-		}
-	}
-
-
-	// Camera movement (WASD) - only if mouse is grabbed AND not rotating held object AND no UI element is active
-	if a.isMouseGrabbed && !a.isRotatingHeldObject && a.activeUIElement == "" {
-		currentCameraSpeed := cameraSpeed // Base speed (now float32)
-
-		// Sprint (Shift)
-		if a.window.GetKey(glfw.KeyLeftShift) == glfw.Press || a.window.GetKey(glfw.KeyRightShift) == glfw.Press {
-			currentCameraSpeed *= 2.0 // Double speed
-		}
-		// Super Speed (Caps Lock)
-		if a.window.GetKey(glfw.KeyCapsLock) == glfw.Press {
-			currentCameraSpeed *= 5.0 // Five times base speed (additive with shift)
-		}
-
-		moveSpeed := currentCameraSpeed * deltaTime
+	// Camera movement (WASD) - only if no UI element is active
+	if a.activeUIElement == "" {
+		moveSpeed := cameraSpeed * deltaTime
 		if a.window.GetKey(glfw.KeyW) == glfw.Press {
 			a.cameraPos = a.cameraPos.Add(a.cameraFront.Mul(moveSpeed))
 		}
@@ -550,72 +405,9 @@ func (a *AppCore) processInput(deltaTime float32) {
 	}
 }
 
-// updateEngine handles game logic and physics.
-func (a *AppCore) updateEngine(deltaTime float32) {
-	// Fixed timestep physics update
-	a.physicsAccumulator += deltaTime
-	for a.physicsAccumulator >= PhysicsTimestep {
-		a.updatePhysics(PhysicsTimestep)
-		a.physicsAccumulator -= PhysicsTimestep
-	}
-
-	// Handle held object
-	if a.heldObject != nil {
-		// Calculate target position in front of camera
-		targetPos := a.cameraPos.Add(a.cameraFront.Mul(a.holdDistance))
-		a.heldObject.Position = targetPos
-		a.heldObject.IsKinematic = true // Held objects are kinematic
-
-		// Apply angular velocity to held object based on mouse input if rotating
-		if a.isRotatingHeldObject {
-			// Angular velocity is already being set in SetCursorPosCallback
-			// We just need to integrate it here.
-			a.heldObject.Rotation = a.heldObject.Rotation.Add(a.heldObject.AngularVelocity.Mul(deltaTime))
-		}
-	}
-}
-
-// updatePhysics updates the physics state of all objects.
-func (a *AppCore) updatePhysics(dt float32) {
-	for _, obj := range a.objects {
-		if obj.IsKinematic {
-			// If object is kinematic (e.g., held by hand or static ground),
-			// clear its velocity and angular velocity so it doesn't move due to physics.
-			obj.Velocity = mgl32.Vec3{0,0,0}
-			obj.AngularVelocity = mgl32.Vec3{0,0,0}
-			continue
-		}
-
-		// Apply gravity
-		obj.Velocity[1] += Gravity * dt // Y-component for gravity
-
-		// Update position based on velocity
-		obj.Position = obj.Position.Add(obj.Velocity.Mul(dt))
-
-		// Update rotation based on angular velocity
-		obj.Rotation = obj.Rotation.Add(obj.AngularVelocity.Mul(dt))
-
-		// Simple ground collision
-		// For a box, check its lowest point relative to its local BoundingBox Min Y
-		// This is a simplification; a full AABB-plane collision is more complex.
-		// We're assuming the bounding box is centered around the object's origin (0,0,0)
-		// and its Y extent is from Min.Y to Max.Y.
-		// So, the lowest point of the object is its Position.Y + Scale.Y * BoundingBox.Min.Y
-		lowestPointY := obj.Position.Y() + obj.Scale.Y() * obj.BoundingBox.Min.Y()
-
-		if lowestPointY < GroundPlaneY {
-			obj.Position[1] = GroundPlaneY - obj.Scale.Y() * obj.BoundingBox.Min.Y() // Snap to ground
-			obj.Velocity[1] = 0 // Stop vertical velocity
-			obj.IsGrounded = true
-			// Apply some damping to horizontal velocity to simulate friction
-			obj.Velocity[0] *= 0.9
-			obj.Velocity[2] *= 0.9
-			// Damp angular velocity as well
-			obj.AngularVelocity = obj.AngularVelocity.Mul(0.9)
-		} else {
-			obj.IsGrounded = false
-		}
-	}
+// updateScene updates editor logic.
+func (a *AppCore) updateScene(deltaTime float32) {
+	// No continuous object rotation by default, manual control now
 }
 
 // renderScene clears buffers and draws all objects.
@@ -631,9 +423,6 @@ func (a *AppCore) renderScene() {
 
 	// Render 2D UI elements
 	a.drawCustomUI()
-	if a.isEGUIVisible {
-		a.drawEGUI() // Draw the E GUI if it's visible
-	}
 
 	a.window.SwapBuffers()
 }
@@ -651,49 +440,61 @@ func (a *AppCore) drawCustomUI() {
 
 	currentY := uiPadding
 
-	// --- Engine Tools Panel ---
+	// --- Editor Tools Panel ---
 	panelX := uiPadding
 	panelWidth := uiPanelWidth
 	panelHeight := float32(0.0) // Will calculate dynamically
 
-	// "Import Model" button (retained for now, but will just log a message)
+	// "Import Model" button
 	buttonX := panelX + uiPadding
 	buttonY := currentY + uiPadding
 	buttonWidth := panelWidth - uiPadding*2
 	buttonHeight := uiButtonHeight
 
-	if a.handleButton(buttonX, buttonY, buttonWidth, buttonHeight, "Import Model (.holym) - Not Supported") {
-		log.Println("Importing .holym models is not supported in this version.")
+	if a.handleButton(buttonX, buttonY, buttonWidth, buttonHeight, "Import Model (.holym)") {
+		log.Print("Enter path to .holym model file (e.g., models/my_model.holym): ")
+		reader := bufio.NewReader(os.Stdin)
+		inputPath, _ := reader.ReadString('\n')
+		inputPath = strings.TrimSpace(inputPath)
+
+		if inputPath != "" {
+			if err := a.loadHolymModel(inputPath); err != nil {
+				log.Printf("Error loading model from %s: %v", inputPath, err)
+			} else {
+				log.Printf("Successfully loaded model from %s", inputPath)
+			}
+		} else {
+			log.Println("No path entered.")
+		}
 	}
 	currentY += uiButtonHeight + uiElementSpacing
 
-	// "Spawn Box" button (from E menu request) - This will be moved to E GUI
-	// if a.handleButton(panelX+uiPadding, currentY, panelWidth-uiPadding*2, uiButtonHeight, "Spawn Box") {
-	// 	// Spawn a box a bit in front of the camera
-	// 	spawnPos := a.cameraPos.Add(a.cameraFront.Mul(InitialHoldDistance))
-	// 	a.createPrimitive("cube", spawnPos)
-	// }
-	// currentY += uiButtonHeight + uiElementSpacing
+	// "Create Primitive" buttons
+	a.drawTextOverlay(panelX+uiPadding, currentY+uiPadding, "Create Primitive:", mgl32.Vec4{1,1,1,1})
+	currentY += uiButtonHeight + uiElementSpacing
+
+	buttonX = panelX + uiPadding
+	if a.handleButton(buttonX, currentY, buttonWidth/2 - uiElementSpacing/2, uiButtonHeight, "Cube") {
+		a.createPrimitive("cube")
+	}
+	buttonX += buttonWidth/2 + uiElementSpacing/2
+	if a.handleButton(buttonX, currentY, buttonWidth/2 - uiElementSpacing/2, uiButtonHeight, "Plane") {
+		a.createPrimitive("plane")
+	}
+	currentY += uiButtonHeight + uiElementSpacing
 
 	a.drawTextOverlay(panelX+uiPadding, currentY+uiPadding, "Scene Objects:", mgl32.Vec4{1,1,1,1})
-	currentY += uiTextHeight + uiElementSpacing
+	currentY += uiButtonHeight + uiElementSpacing
 
 	// Object List (simplified, just selectable text)
 	if len(a.objects) == 0 {
 		a.drawTextOverlay(panelX+uiPadding, currentY+uiPadding, "No objects in scene.", mgl32.Vec4{0.7,0.7,0.7,1})
-		currentY += uiTextHeight + uiElementSpacing
+		currentY += uiButtonHeight + uiElementSpacing
 	} else {
 		for _, obj := range a.objects {
-			// Skip the ground plane in the list
-			if obj.ID == "GroundPlane" {
-				continue
-			}
 			label := obj.ID
 			if obj == a.selectedObject {
 				label += " (Selected)"
-			}
-			if obj == a.heldObject {
-				label += " (Held)"
 			}
 			// For simplicity, we'll make the whole area clickable like a button
 			if a.handleButton(panelX+uiPadding, currentY, panelWidth-uiPadding*2, uiButtonHeight, label) {
@@ -704,7 +505,7 @@ func (a *AppCore) drawCustomUI() {
 	}
 
 	panelHeight = currentY + uiPadding - uiPadding // Adjust for final padding
-	a.drawRect(panelX, uiPadding, panelWidth, panelHeight, mgl32.Vec4{0.15, 0.15, 0.15, 0.8}) // Background for Engine Tools
+	a.drawRect(panelX, uiPadding, panelWidth, panelHeight, mgl32.Vec4{0.15, 0.15, 0.15, 0.8}) // Background for Editor Tools
 
 	// --- Properties Panel for selected object ---
 	if a.selectedObject != nil {
@@ -716,25 +517,25 @@ func (a *AppCore) drawCustomUI() {
 		currentPropY := propPanelY + uiPadding
 
 		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Properties: %s", a.selectedObject.ID), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
+		currentPropY += uiButtonHeight + uiElementSpacing
 
 		// Position Sliders
 		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, "Position X:", mgl32.Vec4{1,1,1,1})
 		currentPropY += uiElementSpacing
 		a.handleSlider(propPanelX+uiPadding, currentPropY, propPanelWidth-uiPadding*2, uiSliderHeight,
-			"pos_x", &a.selectedObject.Position[0], -20.0, 20.0)
+			"pos_x", &a.selectedObject.Position[0], -10.0, 10.0)
 		currentPropY += uiSliderHeight + uiElementSpacing
 
 		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, "Position Y:", mgl32.Vec4{1,1,1,1})
 		currentPropY += uiElementSpacing
 		a.handleSlider(propPanelX+uiPadding, currentPropY, propPanelWidth-uiPadding*2, uiSliderHeight,
-			"pos_y", &a.selectedObject.Position[1], -20.0, 20.0)
+			"pos_y", &a.selectedObject.Position[1], -10.0, 10.0)
 		currentPropY += uiSliderHeight + uiElementSpacing
 
 		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, "Position Z:", mgl32.Vec4{1,1,1,1})
 		currentPropY += uiElementSpacing
 		a.handleSlider(propPanelX+uiPadding, currentPropY, propPanelWidth-uiPadding*2, uiSliderHeight,
-			"pos_z", &a.selectedObject.Position[2], -20.0, 20.0)
+			"pos_z", &a.selectedObject.Position[2], -10.0, 10.0)
 		currentPropY += uiSliderHeight + uiElementSpacing * 2 // Extra spacing
 
 		// Scale Sliders
@@ -756,36 +557,6 @@ func (a *AppCore) drawCustomUI() {
 			"scale_z", &a.selectedObject.Scale[2], 0.01, 5.0)
 		currentPropY += uiSliderHeight + uiElementSpacing * 2 // Extra spacing
 
-		// Velocity (read-only)
-		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Velocity X: %.2f", a.selectedObject.Velocity.X()), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
-		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Velocity Y: %.2f", a.selectedObject.Velocity.Y()), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
-		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Velocity Z: %.2f", a.selectedObject.Velocity.Z()), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
-
-		// Angular Velocity (read-only)
-		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Ang. Vel X: %.2f", mgl32.RadToDeg(a.selectedObject.AngularVelocity.X())), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
-		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Ang. Vel Y: %.2f", mgl32.RadToDeg(a.selectedObject.AngularVelocity.Y())), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
-		a.drawTextOverlay(propPanelX+uiPadding, currentPropY, fmt.Sprintf("Ang. Vel Z: %.2f", mgl32.RadToDeg(a.selectedObject.AngularVelocity.Z())), mgl32.Vec4{1,1,1,1})
-		currentPropY += uiTextHeight + uiElementSpacing
-
-		// IsKinematic toggle
-		if a.selectedObject != a.heldObject { // Cannot toggle kinematic if held by hand
-			if a.handleButton(propPanelX+uiPadding, currentPropY, propPanelWidth-uiPadding*2, uiButtonHeight, fmt.Sprintf("Is Kinematic: %t", a.selectedObject.IsKinematic)) {
-				a.selectedObject.IsKinematic = !a.selectedObject.IsKinematic
-				// If made non-kinematic, apply gravity if not already
-				if !a.selectedObject.IsKinematic {
-					a.selectedObject.Velocity = mgl32.Vec3{0,0,0} // Reset velocity for physics
-					a.selectedObject.AngularVelocity = mgl32.Vec3{0,0,0} // Reset angular velocity
-				}
-			}
-		} else {
-			a.drawTextOverlay(propPanelX+uiPadding, currentPropY, "Is Kinematic: True (Held)", mgl32.Vec4{0.7,0.7,0.7,1})
-		}
-		currentPropY += uiButtonHeight + uiElementSpacing
 
 		propPanelHeight = currentPropY - propPanelY + uiPadding
 		a.drawRect(propPanelX, propPanelY, propPanelWidth, propPanelHeight, mgl32.Vec4{0.15, 0.15, 0.15, 0.8}) // Background for Properties
@@ -793,69 +564,6 @@ func (a *AppCore) drawCustomUI() {
 
 	gl.Enable(gl.DEPTH_TEST) // Re-enable depth test for 3D scene
 }
-
-// drawEGUI renders the GUI that appears when 'E' is pressed.
-func (a *AppCore) drawEGUI() {
-	gl.Disable(gl.DEPTH_TEST) // Ensure UI is drawn on top
-	gl.UseProgram(a.uiProgram)
-
-	// Calculate center position for the E GUI panel
-	panelWidth := float32(400) // Example width
-	panelHeight := float32(300) // Example height
-	panelX := (float32(a.width) - panelWidth) / 2
-	panelY := (float32(a.height) - panelHeight) / 2
-
-	a.drawRect(panelX, panelY, panelWidth, panelHeight, mgl32.Vec4{0.1, 0.1, 0.1, 0.9}) // Dark, semi-transparent background
-	a.drawTextOverlay(panelX+uiPadding, panelY+uiPadding, "Spawn Menu", mgl32.Vec4{1,1,1,1})
-
-	// Grid layout for items
-	gridStartX := panelX + uiPadding
-	gridStartY := panelY + uiPadding + uiTextHeight + uiElementSpacing
-	itemSize := float32(80)
-	itemSpacing := float32(10) // Used for spacing between grid items
-
-	// First square: Cube preview
-	cubeItemX := gridStartX
-	cubeItemY := gridStartY
-
-	// Draw the square for the cube preview
-	a.drawRect(cubeItemX, cubeItemY, itemSize, itemSize, mgl32.Vec4{0.25, 0.25, 0.25, 1.0})
-	a.drawTextOverlay(cubeItemX + itemSize/2 - float32(len("Cube")*3), cubeItemY + itemSize/2 - 8, "Cube", mgl32.Vec4{1,1,1,1})
-
-	// Handle click for the cube preview
-	if a.handleButton(cubeItemX, cubeItemY, itemSize, itemSize, "Spawn Cube Button") {
-		spawnPos := a.cameraPos.Add(a.cameraFront.Mul(InitialHoldDistance))
-		newCube := a.createPrimitive("cube", spawnPos)
-		a.heldObject = newCube // Immediately grab the spawned cube
-		a.isEGUIVisible = false // Close the E GUI
-		a.isMouseGrabbed = true // Re-grab mouse
-		a.window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
-		log.Println("Spawned and grabbed a cube from E GUI.")
-	}
-
-	// Example of another item: Sphere preview
-	nextItemX := gridStartX + itemSize + itemSpacing // Use itemSpacing for horizontal offset
-	sphereItemX := nextItemX
-	sphereItemY := gridStartY
-
-	// Draw the square for the sphere preview
-	a.drawRect(sphereItemX, sphereItemY, itemSize, itemSize, mgl32.Vec4{0.25, 0.25, 0.25, 1.0})
-	a.drawTextOverlay(sphereItemX + itemSize/2 - float32(len("Sphere")*3), sphereItemY + itemSize/2 - 8, "Sphere", mgl32.Vec4{1,1,1,1})
-
-	// Handle click for the sphere preview
-	if a.handleButton(sphereItemX, sphereItemY, itemSize, itemSize, "Spawn Sphere Button") {
-		spawnPos := a.cameraPos.Add(a.cameraFront.Mul(InitialHoldDistance))
-		newSphere := a.createPrimitive("sphere", spawnPos) // Call createPrimitive for sphere
-		a.heldObject = newSphere // Immediately grab the spawned sphere
-		a.isEGUIVisible = false // Close the E GUI
-		a.isMouseGrabbed = true // Re-grab mouse
-		a.window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
-		log.Println("Spawned and grabbed a sphere from E GUI.")
-	}
-
-	gl.Enable(gl.DEPTH_TEST) // Re-enable depth test for 3D scene
-}
-
 
 // isMouseOver checks if the mouse cursor is within the given rectangle.
 func (a *AppCore) isMouseOver(x, y, width, height float32) bool {
@@ -870,21 +578,17 @@ func (a *AppCore) handleButton(x, y, width, height float32, label string) bool {
 	if isOver {
 		buttonColor = mgl32.Vec4{0.3, 0.3, 0.3, 1.0} // Hover color
 	}
-	clicked := false
 	if isOver && a.mouseLeftPressed {
 		buttonColor = mgl32.Vec4{0.1, 0.1, 0.1, 1.0} // Pressed color
-		// If a button is pressed, it becomes the active UI element
-		a.activeUIElement = label
-	}
-
-	// Only register click if mouse was released AND this element was the active one
-	if isOver && a.mouseLeftReleased && a.activeUIElement == label {
-		clicked = true
 	}
 
 	a.drawRect(x, y, width, height, buttonColor)
 	a.drawTextOverlay(x + width/2 - float32(len(label)*3), y + height/2 - 8, label, mgl32.Vec4{1,1,1,1}) // Crude text centering
 
+	clicked := false
+	if isOver && a.mouseLeftReleased {
+		clicked = true
+	}
 	return clicked
 }
 
@@ -1054,185 +758,186 @@ func shutdownApp() {
 	glfw.Terminate()
 }
 
-// --- Hand Tool / Object Picking Functions ---
+// --- Helper functions for .holym model loading and texture creation ---
 
-// getRayFromMouse creates a ray from the camera through the mouse cursor position.
-func (a *AppCore) getRayFromMouse() (origin, direction mgl32.Vec3) {
-	// Screen coordinates to Normalized Device Coordinates (NDC)
-	// (x, y) from (0,0) top-left to (width, height) bottom-right
-	// NDC x: -1 (left) to 1 (right)
-	// NDC y: 1 (top) to -1 (bottom)
-	// NDC z: -1 (near) to 1 (far) (though for raycasting, we often use 0 for near, 1 for far)
-	ndcX := (a.mousePosX/float32(a.width))*2.0 - 1.0
-	ndcY := 1.0 - (a.mousePosY/float32(a.height))*2.0 // Y is inverted
-
-	// Clip space coordinates
-	clipCoords := mgl32.Vec4{ndcX, ndcY, -1.0, 1.0} // -1.0 for Z means near plane
-
-	// Inverse Projection Matrix - Corrected: Use projection.Inv()
-	projection := mgl32.Perspective(mgl32.DegToRad(45.0), float32(a.width)/float32(a.height), 0.1, farClippingPlane)
-	invProjection := projection.Inv()
-
-	// Eye space coordinates
-	eyeCoords := invProjection.Mul4x1(clipCoords)
-	eyeCoords = mgl32.Vec4{eyeCoords.X(), eyeCoords.Y(), -1.0, 0.0} // Z = -1.0, W = 0.0 for direction vector
-
-	// Inverse View Matrix - Corrected: Use view.Inv()
-	view := mgl32.LookAtV(a.cameraPos, a.cameraPos.Add(a.cameraFront), a.cameraUp)
-	invView := view.Inv()
-
-	// World space coordinates (ray direction)
-	worldRay := invView.Mul4x1(eyeCoords)
-	rayDirection := mgl32.Vec3{worldRay.X(), worldRay.Y(), worldRay.Z()}.Normalize()
-
-	return a.cameraPos, rayDirection
-}
-
-// intersectRayAABB checks if a ray intersects an AABB.
-// Returns true and intersection distance if it hits, false otherwise.
-// Intersection algorithm based on "An Efficient and Robust Ray-Box Intersection Algorithm" by Amy Williams et al.
-func intersectRayAABB(rayOrigin, rayDirection mgl32.Vec3, boxMin, boxMax mgl32.Vec3) (bool, float32) {
-	tMin := float32(0.0)
-	tMax := float32(math.Inf(1)) // Positive infinity
-
-	for i := 0; i < 3; i++ { // For X, Y, Z axes
-		if math.Abs(float64(rayDirection[i])) < 1e-6 { // Ray is parallel to slab
-			if rayOrigin[i] < boxMin[i] || rayOrigin[i] > boxMax[i] {
-				return false, 0 // No hit
-			}
-		} else {
-			t1 := (boxMin[i] - rayOrigin[i]) / rayDirection[i]
-			t2 := (boxMax[i] - rayOrigin[i]) / rayDirection[i]
-
-			if t1 > t2 {
-				t1, t2 = t2, t1 // Swap to ensure t1 is always smaller
-			}
-
-			tMin = float32(math.Max(float64(tMin), float64(t1)))
-			tMax = float32(math.Min(float64(tMax), float64(t2)))
-
-			if tMin > tMax {
-				return false, 0 // No hit
-			}
-		}
+// parseHolym reads a .holym file and returns parsed data.
+// Format: v X Y Z [c R G B], vt U V, f V1/VT1 V2/VT2 V3/VT3, tex_path <path>
+func parseHolym(filePath string) ([]float32, []uint32, bool, string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, false, "", fmt.Errorf("failed to open .holym file: %w", err)
 	}
-	return true, tMin
-}
+	defer file.Close()
 
-// tryPickObject attempts to pick up an object using a raycast.
-func (a *AppCore) tryPickObject() {
-	rayOrigin, rayDirection := a.getRayFromMouse()
+	var positions []mgl32.Vec3
+	var colors []mgl32.Vec3
+	var texCoords []mgl32.Vec2
+	var faces [][3]struct{ Vertex, TexCoord int } // Store 0-based indices for vertex/texcoord
+	var texturePath string
 
-	closestHit := float32(PickupRange + 1.0) // Initialize with a value outside pickup range
-	var hitObject *GameObject = nil
-
-	for _, obj := range a.objects {
-		// Skip ground plane and currently held object
-		if obj.ID == "GroundPlane" || obj == a.heldObject {
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
 			continue
 		}
 
-		// Transform object's local bounding box to world space
-		// Corrected: Manual component-wise multiplication instead of MulV
-		scaledMin := obj.Position.Add(mgl32.Vec3{
-			obj.BoundingBox.Min.X() * obj.Scale.X(),
-			obj.BoundingBox.Min.Y() * obj.Scale.Y(),
-			obj.BoundingBox.Min.Z() * obj.Scale.Z(),
-		})
-		scaledMax := obj.Position.Add(mgl32.Vec3{
-			obj.BoundingBox.Max.X() * obj.Scale.X(),
-			obj.BoundingBox.Max.Y() * obj.Scale.Y(),
-			obj.BoundingBox.Max.Z() * obj.Scale.Z(),
-		})
+		switch fields[0] {
+		case "v": // Vertex position and optional color
+			if len(fields) < 4 { continue }
+			x, _ := strconv.ParseFloat(fields[1], 32)
+			y, _ := strconv.ParseFloat(fields[2], 32)
+			z, _ := strconv.ParseFloat(fields[3], 32)
+			positions = append(positions, mgl32.Vec3{float32(x), float32(y), float32(z)})
 
-		if hit, dist := intersectRayAABB(rayOrigin, rayDirection, scaledMin, scaledMax); hit {
-			if dist < PickupRange && dist < closestHit {
-				closestHit = dist
-				hitObject = obj
+			// Check for optional color
+			if len(fields) == 7 && fields[4] == "c" {
+				r, _ := strconv.ParseFloat(fields[5], 32)
+				g, _ := strconv.ParseFloat(fields[6], 32)
+				b, _ := strconv.ParseFloat(fields[7], 32)
+				colors = append(colors, mgl32.Vec3{float32(r), float32(g), float32(b)})
+			} else {
+				colors = append(colors, mgl32.Vec3{1.0, 1.0, 1.0}) // Default white
+			}
+
+		case "vt": // Texture coordinate
+			if len(fields) < 3 { continue }
+			u, _ := strconv.ParseFloat(fields[1], 32)
+			v, _ := strconv.ParseFloat(fields[2], 32)
+			texCoords = append(texCoords, mgl32.Vec2{float32(u), float32(v)})
+
+		case "f": // Face (triangle)
+			if len(fields) < 4 { continue } // Expecting 3 vertex/texcoord pairs for a triangle
+			var face [3]struct{ Vertex, TexCoord int }
+			for i := 0; i < 3; i++ {
+				parts := strings.Split(fields[i+1], "/")
+				if len(parts) != 2 {
+					return nil, nil, false, "", fmt.Errorf("invalid face format: %s (expected V/VT)", fields[i+1])
+				}
+				vIdx, _ := strconv.Atoi(parts[0])
+				vtIdx, _ := strconv.Atoi(parts[1])
+				face[i].Vertex = vIdx - 1   // Convert to 0-based index
+				face[i].TexCoord = vtIdx - 1 // Convert to 0-based index
+			}
+			faces = append(faces, face)
+		case "tex_path": // Texture path
+			if len(fields) < 2 { continue }
+			texturePath = fields[1]
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, false, "", fmt.Errorf("error scanning .holym file: %w", err)
+	}
+
+	// Removed `interleavedVertices` as it was declared but not used.
+	uniqueVertices := make([]float32, 0) // Stores interleaved unique vertex data
+	var indices []uint32
+
+	// For faces, we need to map V/VT to actual interleaved vertex data.
+	// We'll create a map to store unique vertex combinations (pos+color+texcoord)
+	// to allow for efficient reuse and proper EBO.
+	type VertexKey struct {
+		PosIndex int
+		ColorIndex int // Assuming color is also indexed by position index for simplicity
+		TexCoordIndex int
+	}
+	vertexMap := make(map[VertexKey]uint32)
+
+
+	for _, face := range faces {
+		for i := 0; i < 3; i++ {
+			vIdx := face[i].Vertex
+			vtIdx := face[i].TexCoord
+
+			if vIdx < 0 || vIdx >= len(positions) {
+				return nil, nil, false, "", fmt.Errorf("vertex index out of bounds: %d", vIdx+1)
+			}
+			if vtIdx < 0 || vtIdx >= len(texCoords) {
+				return nil, nil, false, "", fmt.Errorf("texture coordinate index out of bounds: %d", vtIdx+1)
+			}
+			if vIdx >= len(colors) { // Ensure color exists for vertex
+				log.Printf("Warning: No color specified for vertex %d, defaulting to white.", vIdx+1)
+				colors[vIdx] = mgl32.Vec3{1,1,1} // Ensure there's a color
+			}
+
+
+			key := VertexKey{PosIndex: vIdx, ColorIndex: vIdx, TexCoordIndex: vtIdx}
+
+			if index, ok := vertexMap[key]; ok {
+				indices = append(indices, index)
+			} else {
+				// Add new unique vertex
+				newIndex := uint32(len(uniqueVertices) / 8) // 8 floats per vertex
+
+				pos := positions[vIdx]
+				color := colors[vIdx]
+				texCoord := texCoords[vtIdx]
+
+				uniqueVertices = append(uniqueVertices, pos.X(), pos.Y(), pos.Z())
+				uniqueVertices = append(uniqueVertices, color.X(), color.Y(), color.Z())
+				uniqueVertices = append(uniqueVertices, texCoord.X(), texCoord.Y())
+
+				vertexMap[key] = newIndex
+				indices = append(indices, newIndex)
 			}
 		}
 	}
 
-	if hitObject != nil {
-		a.heldObject = hitObject
-		a.heldObject.IsKinematic = true // Disable physics while held
-		a.heldObject.Velocity = mgl32.Vec3{0,0,0} // Stop any current motion
-		a.heldObject.AngularVelocity = mgl32.Vec3{0,0,0} // Stop any current rotation
-		log.Printf("Picked up object: %s", a.heldObject.ID)
-	}
+	hasTexture := (texturePath != "")
+	return uniqueVertices, indices, hasTexture, texturePath, nil
 }
 
-// releaseHeldObject releases the currently held object.
-func (a *AppCore) releaseHeldObject() {
-	if a.heldObject != nil {
-		a.heldObject.IsKinematic = false // Re-enable physics
-
-		// Apply a throw force based on camera direction
-		throwDirection := a.cameraFront.Normalize()
-		a.heldObject.Velocity = throwDirection.Mul(ThrowForceMagnitude)
-
-		// If it was rotating, maintain angular velocity, otherwise clear it
-		if !a.isRotatingHeldObject {
-			a.heldObject.AngularVelocity = mgl32.Vec3{0,0,0}
-		}
-
-		log.Printf("Released object: %s", a.heldObject.ID)
-		a.heldObject = nil
-		a.isRotatingHeldObject = false // Ensure rotation state is reset
+// newTexture creates an OpenGL texture from an image path.
+func newTexture(imgPath string) (uint32, error) {
+	file, err := os.Open(imgPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open texture file %s: %w", imgPath, err)
 	}
-}
+	defer file.Close()
 
+	img, _, err := image.Decode(file)
+	if err != nil {
+		return 0, fmt.Errorf("failed to decode texture image %s: %w", imgPath, err)
+	}
 
-// --- Model/Primitive Creation Functions ---
+	rgba := image.NewRGBA(img.Bounds())
+	draw.Draw(rgba, rgba.Bounds(), img, image.Point{0, 0}, draw.Src)
 
-// newTexture creates an OpenGL texture from an image.
-func newTexture(img image.Image) (uint32, error) {
 	var texture uint32
 	gl.GenTextures(1, &texture)
 	gl.BindTexture(gl.TEXTURE_2D, texture)
 
-	// Set texture wrapping and filtering options
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR) // Use mipmaps
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR) // Use mipmaps for better quality
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-
-	rgba := image.NewRGBA(img.Bounds())
-	// Ensure that the image is copied into an RGBA format that OpenGL expects
-	draw.Draw(rgba, rgba.Bounds(), img, image.Point{0, 0}, draw.Src)
 
 	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, int32(rgba.Rect.Size().X), int32(rgba.Rect.Size().Y), 0,
 		gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(rgba.Pix))
 	gl.GenerateMipmap(gl.TEXTURE_2D)
 
-	gl.BindTexture(gl.TEXTURE_2D, 0) // Unbind texture
-
+	gl.BindTexture(gl.TEXTURE_2D, 0)
 	return texture, nil
 }
 
 // createGameObject initializes OpenGL buffers for a new GameObject and adds it to the scene.
-func (a *AppCore) createGameObject(id string, vertices []float32, indices []uint32, hasTexture bool, texturePath string, initialPos mgl32.Vec3, mass float32, boundingBox BoundingBox) *GameObject {
+func (a *AppCore) createGameObject(id string, vertices []float32, indices []uint32, hasTexture bool, texturePath string) *GameObject {
 	newObj := &GameObject{
 		ID:           id,
 		Vertices:     vertices,
 		Indices:      indices,
 		IndicesCount: int32(len(indices)),
-		Position:     initialPos,
+		Position:     mgl32.Vec3{0, 0, 0}, // Spawn at origin by default
 		Rotation:     mgl32.Vec3{0, 0, 0}, // Initial rotation
 		Scale:        mgl32.Vec3{1, 1, 1}, // Initial scale
 		HasTexture:   hasTexture,
 		TexturePath:  texturePath,
-		Velocity:     mgl32.Vec3{0, 0, 0},
-		AngularVelocity: mgl32.Vec3{0,0,0},
-		IsKinematic:  false, // Start as dynamic unless explicitly set
-		IsGrounded:   false,
-		Mass:         mass,
-		BoundingBox:  boundingBox,
 	}
 
 	// Load texture if path is provided
 	if newObj.HasTexture && newObj.TexturePath != "" {
-		texID, err := newTextureFromFile(newObj.TexturePath) // Use helper to load from file
+		texID, err := newTexture(newObj.TexturePath)
 		if err != nil {
 			log.Printf("Warning: Failed to load texture %s for model %s: %v", newObj.TexturePath, newObj.ID, err)
 			newObj.HasTexture = false // Fallback to vertex colors
@@ -1270,90 +975,39 @@ func (a *AppCore) createGameObject(id string, vertices []float32, indices []uint
 	return newObj
 }
 
-// newTextureFromFile loads an image from a file and creates an OpenGL texture.
-func newTextureFromFile(imgPath string) (uint32, error) {
-	file, err := os.Open(imgPath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to open texture file %s: %w", imgPath, err)
-	}
-	defer file.Close()
-
-	img, _, err := image.Decode(file)
-	if err != nil {
-		return 0, fmt.Errorf("failed to decode texture image %s: %w", imgPath, err)
-	}
-	return newTexture(img)
-}
-
-// loadHolymModel is now a placeholder as per user request.
+// loadHolymModel loads a .holym model from file.
 func (a *AppCore) loadHolymModel(filePath string) error {
-	log.Printf("Loading .holym models is currently disabled. Attempted to load: %s", filePath)
-	// For demonstration, we could spawn a default cube instead of loading the model
-	// a.createPrimitive("cube", a.cameraPos.Add(a.cameraFront.Mul(InitialHoldDistance)))
-	return nil // Return nil error to indicate it "handled" the request gracefully
+	vertices, indices, hasTexture, texturePath, err := parseHolym(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to parse .holym model %s: %w", filePath, err)
+	}
+
+	id := fmt.Sprintf("%s_%d", filepath.Base(filePath), a.nextObjectID)
+	a.selectedObject = a.createGameObject(id, vertices, indices, hasTexture, texturePath)
+	return nil
 }
 
 // createPrimitive generates a new primitive shape and adds it to the scene.
-// It now returns the created GameObject.
-func (a *AppCore) createPrimitive(shapeType string, initialPos mgl32.Vec3) *GameObject {
+func (a *AppCore) createPrimitive(shapeType string) {
 	var vertices []float32
 	var indices []uint32
 	var id string
-	var bbox BoundingBox
-	var mass float32 = 1.0 // Default mass for primitives
 
 	switch shapeType {
 	case "cube":
 		id = fmt.Sprintf("Cube_%d", a.nextObjectID)
 		vertices, indices = generateCubeData()
-		bbox = BoundingBox{Min: mgl32.Vec3{-0.5, -0.5, -0.5}, Max: mgl32.Vec3{0.5, 0.5, 0.5}} // Unit cube
 	case "plane":
 		id = fmt.Sprintf("Plane_%d", a.nextObjectID)
 		vertices, indices = generatePlaneData()
-		// For a plane, the bounding box typically has zero height on the plane axis
-		bbox = BoundingBox{Min: mgl32.Vec3{-0.5, 0.0, -0.5}, Max: mgl32.Vec3{0.5, 0.0, 0.5}} // Unit plane on Y=0
-		mass = 0.0 // Planes are static/immovable
-	case "sphere": // New case for sphere
-		id = fmt.Sprintf("Sphere_%d", a.nextObjectID)
-		// Placeholder for sphere data generation.
-		// In a real engine, you'd have a generateSphereData() function.
-		// For now, we'll use cube data as a visual stand-in to avoid a crash,
-		// but log a warning.
-		log.Println("Warning: Sphere generation not implemented. Using cube data as placeholder.")
-		vertices, indices = generateCubeData() // Placeholder: use cube data
-		bbox = BoundingBox{Min: mgl32.Vec3{-0.5, -0.5, -0.5}, Max: mgl32.Vec3{0.5, 0.5, 0.5}} // Placeholder: cube bbox
 	default:
 		log.Printf("Unsupported primitive type: %s", shapeType)
-		return nil // Return nil if unsupported
+		return
 	}
 
-	newObj := a.createGameObject(id, vertices, indices, false, "", initialPos, mass, bbox)
-	if shapeType == "plane" {
-		newObj.IsKinematic = true // Ground plane should be kinematic
-	}
-	a.selectedObject = newObj
+	a.selectedObject = a.createGameObject(id, vertices, indices, false, "") // Primitives start untextured
 	log.Printf("Created primitive: %s", id)
-	return newObj // Return the created object
 }
-
-// createGroundPlane creates a large, static ground plane.
-func (a *AppCore) createGroundPlane() {
-	vertices, indices := generatePlaneData()
-	ground := a.createGameObject(
-		"GroundPlane",
-		vertices,
-		indices,
-		false, // No texture for now
-		"",
-		mgl32.Vec3{0, GroundPlaneY, 0}, // Position at the ground plane Y
-		0.0, // Infinite mass, doesn't move
-		BoundingBox{Min: mgl32.Vec3{-0.5, 0.0, -0.5}, Max: mgl32.Vec3{0.5, 0.0, 0.5}}, // Unit plane bbox
-	)
-	ground.Scale = mgl32.Vec3{100, 1, 100} // Make it large
-	ground.IsKinematic = true // It's a static part of the environment
-	log.Println("Created ground plane.")
-}
-
 
 // generateCubeData returns interleaved vertex data for a unit cube (1x1x1).
 // Each face has its own vertices to allow for distinct UVs and colors.
@@ -1533,30 +1187,25 @@ func main() {
 		log.Fatalf("Application initialization failed: %v", err)
 	}
 
-	log.Println("Holy Engine Base initialized. Starting main loop...")
+	log.Println("Holy Model Maker (Editor) initialized. Starting main loop...")
 	log.Println("Controls:")
 	log.Println("  WASD: Move camera")
-	log.Println("  Mouse: Look around (when grabbed)")
-	log.Println("  ESC: Toggle mouse grab / Exit")
-	log.Println("  E: Toggle Spawn Menu (releases mouse grab)")
-	log.Println("  Left-click (when grabbed): Pick up/Throw object")
-	log.Println("  R (hold) + Mouse (when holding object): Rotate held object")
-	log.Println("  Scroll Wheel (when holding object): Adjust hold distance")
-	log.Println("  Shift: Sprint")
-	log.Println("  Caps Lock: Super Speed")
-	log.Println("  Use UI panels to Spawn Boxes and Transform Selected Objects.")
+	log.Println("  Right-click + Drag: Look around")
+	log.Println("  Left-click: Cycle through objects (outside UI)")
+	log.Println("  Use UI panels to Load Models, Create Primitives, and Transform Selected Objects.")
+	log.Println("  ESC: Exit")
 
-	// Main Engine Loop
+	// Main Editor Loop
 	for !app.shouldClose() {
 		currentTime := time.Now()
 		deltaTime := float32(currentTime.Sub(app.lastFrameTime).Seconds())
 		app.lastFrameTime = currentTime
 
-		// Process input (handles custom UI interaction, camera, and object picking)
+		// Process input (handles custom UI interaction and camera)
 		app.processInput(deltaTime)
 
-		// Update engine logic (physics, held objects)
-		app.updateEngine(deltaTime)
+		// Update scene logic
+		app.updateScene(deltaTime)
 
 		// Render the scene (3D objects + Custom UI)
 		app.renderScene()
@@ -1566,5 +1215,5 @@ func main() {
 		app.mouseLeftReleased = false
 	}
 
-	log.Println("Holy Engine Base shutting down.")
+	log.Println("Holy Model Maker (Editor) shutting down.")
 }
